@@ -83,6 +83,31 @@ If you are actively modifying the code and prefer hot-reloading (without waiting
 
 ---
 
+## ⚡ CI/CD Pipeline & Automated Deployment
+
+BankOfCaptcha features an automated, enterprise-grade 5-stage CI/CD pipeline defined in `.github/workflows/ci-cd.yml`:
+1. **Linting & Code Quality**: Validates Docker Compose files, Java compilation, Python syntax, and frontend code with Oxlint.
+2. **Automated Unit & Security Tests**: Runs backend JUnit 5 & PQC verification tests, AI LSTM tensor tests, and frontend production builds.
+3. **Container Build & Trivy Vulnerability Scan**: Builds all Docker images with Buildx caching and scans for container vulnerabilities.
+4. **Containerized Deployment & E2E Tests**: Boots the 4-tier stack in Docker Compose, runs automated E2E smoke tests (`tests/e2e_integration_test.py`), and captures debug logs on failure.
+5. **Continuous Delivery (CD)**: Automatically publishes versioned images to the GitHub Container Registry (`ghcr.io`) upon merging to `main`.
+
+### Running the CI/CD Pipeline Locally:
+```bash
+chmod +x scripts/run_ci_cd_local.sh
+./scripts/run_ci_cd_local.sh
+```
+
+### Production Deployment Script:
+```bash
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh production
+```
+
+For complete documentation, see [`CI_CD_DOCUMENTATION.md`](file:///home/shreshtha-kumar/Desktop/Projects/FinSparkv4/bankofcaptcha2/CI_CD_DOCUMENTATION.md).
+
+---
+
 ## 🔑 Demo Accounts
 
 On the very first startup, the Java backend automatically seeds the database with the following demo users so you can test the different role dashboards immediately:

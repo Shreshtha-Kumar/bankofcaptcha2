@@ -1,0 +1,271 @@
+name: CI/CD Pipeline - BankOfCaptcha
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  # =========================================================================
+  # Stage 1: Static Analysis, Linting & Configuration Validation
+  # =========================================================================
+  lint-and-validate:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Verify Backend Code Compilation
+        run: |
+          cd backend
+          mvn clean test-compile
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies & Lint
+        run: |
+          cd frontend
+          npm ci
+          npm run lint
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: ai/requirements.txt
+
+      - name: Validate Python Syntax & Dependencies
+        run: |
+          python3 -m py_compile ai/*.py ai/traffic_generators/*.py manual_test_files/*.py tests/*.py
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          docker compose -f docker-compose.yml config > /dev/null
+          docker compose -f docker-compose.full.yml config > /dev/null
+          echo "Docker compose specifications are valid."
+
+  # =========================================================================
+  # Stage 2: Automated Unit, Cryptographic & Behavioral Model Tests
+  # =========================================================================
+  unit-and-component-tests:
+    name: Automated Unit & Security Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Run Backend JUnit 5 & PQC Cryptography Tests
+        run: |
+          cd backend
+          mvn test
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Verify Frontend Production Build Bundle
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install AI Module Test Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r ai/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run AI Neural Network & Anomaly Inference Unit Tests
+        run: |
+          python3 -m unittest discover -s ai/tests -p "test_*.py"
+
+  # =========================================================================
+  # Stage 3: Container Build & Vulnerability Scan
+  # =========================================================================
+  container-build-and-scan:
+    name: Container Build & Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Backend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: false
+          tags: bankofcaptcha-backend:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: false
+          tags: bankofcaptcha-frontend:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build AI Module Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ai
+          push: false
+          tags: bankofcaptcha-ai:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy Security Vulnerability Scan on Backend Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'bankofcaptcha-backend:test'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+  # =========================================================================
+  # Stage 4: Containerized Stack Deployment & E2E Integration Verification
+  # =========================================================================
+  containerized-deployment-and-e2e:
+    name: Containerized Deployment & E2E Tests
+    runs-on: ubuntu-latest
+    needs: [unit-and-component-tests, container-build-and-scan]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Spin Up 4-Tier Containerized Stack via Docker Compose
+        run: |
+          docker compose -f docker-compose.full.yml up --build -d
+
+      - name: Set up Python for Integration Tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Integration Test Requirements
+        run: |
+          python3 -m pip install requests
+
+      - name: Execute End-to-End Containerized Smoke & Security Test Suite
+        env:
+          BACKEND_URL: "http://localhost:8080/api"
+          FRONTEND_URL: "http://localhost:5173"
+          AI_SERVICE_KEY: "bankofcaptcha-local-ai-service-key-change-before-deployment"
+        run: |
+          python3 tests/e2e_integration_test.py
+
+      - name: Collect Container Logs on Failure
+        if: failure()
+        run: |
+          mkdir -p logs
+          docker compose -f docker-compose.full.yml logs > logs/container-stack.log
+
+      - name: Upload Container Debug Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-logs-on-failure
+          path: logs/
+
+      - name: Tear Down Containerized Stack
+        if: always()
+        run: |
+          docker compose -f docker-compose.full.yml down -v
+
+  # =========================================================================
+  # Stage 5: Continuous Delivery - Publish Images to Container Registry
+  # =========================================================================
+  publish-container-images:
+    name: Publish Container Images (CD)
+    runs-on: ubuntu-latest
+    needs: containerized-deployment-and-e2e
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push Backend Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/backend:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/backend:${{ github.sha }}
+
+      - name: Build & Push Frontend Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/frontend:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/frontend:${{ github.sha }}
+
+      - name: Build & Push AI Engine Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ai
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/ai:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/ai:${{ github.sha }}
+
